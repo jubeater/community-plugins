@@ -52,10 +52,16 @@ Optional:
 - **`niri`** — Annotate Window on Niri captures the focused window
 
 Screenshots and annotation use the shell's own screenshot stack
-(`screenshot-region`, `screenshot-fullscreen`, `annotate`), so captures land
-in the shell's screenshot directory with its filename pattern. `Annotate
-Window` hovers to aim — everything dims except the window under the cursor —
-then the click captures that window. On Niri it captures the focused window
+(`screenshot-region`, `screenshot-fullscreen`, `annotate`). On Noctalia
+builds with per-call screenshot options, every intermediate capture (OCR,
+QR, palette, Lens, measure, and the raw frame behind Markup) is forced into
+a plugin-owned temporary file — no clipboard copy, no annotation editor, and
+nothing in your screenshots folder — so these tools work even with file
+saving disabled in Settings → Screenshot. On older builds the plugin falls
+back to the shell's global capture policy (file saving must be enabled) and
+moves the file out of the screenshots folder afterwards. `Annotate Window`
+hovers to aim — everything dims except the window under the cursor — then
+the click captures that window. On Niri it captures the focused window
 directly.
 
 ## Usage
@@ -131,11 +137,15 @@ gpu-screen-recorder and wl-screenrec receive their corresponding cursor
 options. wf-recorder does not expose a portable cursor flag, so its behavior
 depends on the compositor.
 
-- **Markup** captures the region and opens it in the shell's annotation
-  editor; Copy and Save deliver the annotated PNG per the shell's screenshot
-  policy. **Markup FS** captures the focused monitor. **Markup Window** dims
-  the screen except the hovered window — click captures that window
-  (Hyprland; Niri captures the focused window instead).
+- **Markup** captures the region into a temporary file and opens it in the
+  shell's annotation editor; Copy and Save deliver the annotated PNG per the
+  shell's screenshot policy, so only what you explicitly keep leaves a file
+  behind. Enable **Keep Raw Markup Captures** to also save the un-annotated
+  capture to your screenshots folder (the pre-1.6 behavior). **Markup FS**
+  captures the focused monitor. **Markup Window** dims the screen except the
+  hovered window — click captures that window (Hyprland; Niri captures the
+  focused window instead); its uncropped monitor frame is always temporary
+  and never kept.
 - **Measure** reports the region's pixel size and copies it to the clipboard.
 - **OCR** extracts text and copies it to the clipboard. The result includes the
   capture preview and an editable multiline text area, so you can correct, trim,
@@ -149,10 +159,10 @@ depends on the compositor.
 
 Results are delivered to the clipboard with a notification — the panel itself
 only holds the tools. Results persist across restarts in the plugin's data
-directory. Captures land in the shell's screenshot directory and persist —
-except for the text-only tools (OCR, QR, Palette, Measure, Lens), which work
-off a temp copy and delete the screenshot right away, so they leave no file
-behind. Window crops and recording thumbnails live in `/tmp`.
+directory. Intermediate captures (text-only tools and markup raws) go
+straight to a temporary file, so nothing is left in your screenshots folder;
+with **Keep Raw Markup Captures** on, markup raws are saved there. Window
+crops and recording thumbnails live in `/tmp`.
 
 ## Settings
 
@@ -167,6 +177,7 @@ All settings live in Settings → Plugins (gear on the plugin's row).
 | `x02-api-key` | `string` | *(empty)* | up.x02.me key for longer-lived, larger uploads. |
 | `x02-expiry` | `select` | `7d` | Link lifetime when an x02 key is set: `1h`, `1d`, `7d`, `30d`, or `permanent`. |
 | `share-skip-popover` | `bool` | `false` | Compatibility setting retained from v4. The v5 result panel copies share links directly. |
+| `annotate-keep-raw` | `bool` | `false` | Save the un-annotated capture to the screenshots folder before the annotation editor opens. Off by default: the raw stays in a temporary file and only the editor's Copy / Save output is kept. |
 | `record-audio-out` | `bool` | `false` | Record the desktop's audio output. |
 | `record-audio-in` | `bool` | `false` | Record the default microphone. |
 | `hide-cursor` | `bool` | `true` | Exclude the cursor from recordings. Screenshots follow the shell's screenshot cursor setting. |
@@ -280,6 +291,15 @@ Summary of every service command:
   follows its own source selection.
 - Region coordinates are captured in physical pixels; `recordFullscreen`
   multiplies the focused output's logical geometry by its scale.
+- Intermediate captures (OCR, QR, palette, Lens, measure, markup raws, and
+  the monitor frame behind Markup Window) never touch your screenshots
+  folder on Noctalia builds with per-call screenshot options: they are
+  forced into a temporary directory under `$TMPDIR` (stale captures older
+  than a day are pruned automatically). On older builds the plugin falls
+  back to the shell's global capture policy — file saving must be enabled
+  there — and moves the picked-up file to a temporary one immediately after.
+  Your own `screenshot-region` / `screenshot-fullscreen` keybinds are never
+  affected.
 - Files are written to your configured screenshot/video directories and the
   plugin's persistent data directory (state, color history). Captures in `/tmp`
   are transient.
