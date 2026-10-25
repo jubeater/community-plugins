@@ -54,34 +54,70 @@
 
 set -u
 
-# Resolve the shell's screenshot directory. getConfig only sees plugin
-# keys, so parse the shell's own files (first match wins), then default.
-# Never write these files: the running shell owns and rewrites them.
+# Read the directory from canonical TOML, distinguishing an explicit empty
+# value (use XDG Pictures) from a missing key (try the next legacy source).
+screenshot_dir_value() {
+    awk '
+        /^[[:space:]]*\[shell\.screenshot\]/ { in_s = 1; next }
+        /^[[:space:]]*\[/ { in_s = 0 }
+        in_s && /^[[:space:]]*directory[[:space:]]*=/ {
+            line = $0
+            sub(/^[^=]*=/, "", line)
+            gsub(/^[ \t"]+|[ \t"]+$/, "", line)
+            print line
+            found = 1
+            exit
+        }
+        END { if (!found) exit 1 }
+    '
+}
+
+# Match the shell's XDG Pictures fallback without sourcing user-dirs.dirs
+# as executable shell code. Only absolute paths or $HOME-prefixed values
+# are accepted from that file, as in Noctalia's defaultPicturesDirectory.
+pictures_dir() {
+    local val="${XDG_PICTURES_DIR:-}"
+    case "$val" in
+        '$HOME'/*) val="$HOME/${val#\$HOME/}" ;;
+        '~'/*) val="$HOME/${val#\~/}" ;;
+    esac
+    if [[ "$val" = /* ]]; then
+        printf '%s\n' "$val"
+        return
+    fi
+    val=$(sed -n 's/^[[:space:]]*XDG_PICTURES_DIR="\([^"]*\)".*/\1/p' \
+        "${XDG_CONFIG_HOME:-$HOME/.config}/user-dirs.dirs" 2>/dev/null | head -1)
+    case "$val" in
+        '$HOME'/*) val="$HOME/${val#\$HOME/}" ;;
+    esac
+    [[ "$val" = /* ]] || val="$HOME/Pictures"
+    printf '%s\n' "$val"
+}
+
+# Export uses the same merged config/include stack as the shell. Older
+# builds without export retain the settings-file fallback. Never write
+# these files: the running shell owns and rewrites them.
 shell_dir() {
-    local f val
-    for f in "$HOME/.local/state/noctalia/settings.toml" "$HOME/.config/noctalia/settings.toml"; do
-        [ -f "$f" ] || continue
-        val=$(awk '
-            /^\s*\[shell\.screenshot\]/ { in_s = 1; next }
-            /^\s*\[/ { in_s = 0 }
-            in_s && /^\s*directory\s*=/ {
-                line = $0
-                sub(/^[^=]*=/, "", line)
-                gsub(/^[ \t"]+|[ \t"]+$/, "", line)
-                print line
-                exit
-            }
-        ' "$f" 2>/dev/null)
-        if [ -n "$val" ]; then
-            case "$val" in
-                "~"/*) val="$HOME/${val#\~/}" ;;
-                "~") val="$HOME" ;;
-            esac
-            printf '%s\n' "$val"
-            return 0
-        fi
-    done
-    printf '%s\n' "$HOME/Pictures/Screenshots"
+    local config f val=""
+    if config=$(noctalia config export full 2>/dev/null) \
+        && val=$(printf '%s\n' "$config" | screenshot_dir_value); then
+        :
+    else
+        for f in "${XDG_STATE_HOME:-$HOME/.local/state}/noctalia/settings.toml" \
+            "${XDG_CONFIG_HOME:-$HOME/.config}/noctalia/settings.toml"; do
+            [ -f "$f" ] || continue
+            if val=$(screenshot_dir_value < "$f"); then break; fi
+        done
+    fi
+    if [ -z "$val" ]; then
+        pictures_dir
+        return
+    fi
+    case "$val" in
+        "~"/*) val="$HOME/${val#\~/}" ;;
+        "~") val="$HOME" ;;
+    esac
+    printf '%s\n' "$val"
 }
 
 # Newest regular file in $1 newer than ($2 - 2s). Prints nothing when none.
@@ -149,15 +185,16 @@ ipc_flags() {
         1) return 0 ;;
         0) return 1 ;;
     esac
-    local h
+    local h flag
     h=$(noctalia msg screenshot-region --help 2>/dev/null)
-    if printf '%s\n' "$h" | grep -q -- '--save-to-file' \
-        && printf '%s\n' "$h" | grep -q -- '--directory' \
-        && printf '%s\n' "$h" | grep -q -- '--format'; then
-        ST_IPC_FLAGS=1
-    else
-        ST_IPC_FLAGS=0
-    fi
+    ST_IPC_FLAGS=1
+    for flag in --save-to-file --no-copy-to-clipboard --no-pipe-to-command \
+        --no-annotate --no-confirm-region --directory --filename-pattern --format; do
+        if ! printf '%s\n' "$h" | grep -q -- "$flag"; then
+            ST_IPC_FLAGS=0
+            break
+        fi
+    done
     export ST_IPC_FLAGS
     [ "$ST_IPC_FLAGS" = "1" ]
 }
@@ -172,7 +209,7 @@ prune_tmp_caps() {
 
 # Capture via $1 (screenshot-region|screenshot-fullscreen) after a $2-second
 # settle (let a just-closed panel finish its animation) into a fresh temp
-# dir; prints "$tdir/capture.png". With per-call flags the capture is forced
+# dir; prints the capture path. With per-call flags the capture is forced
 # to a plain saved PNG with no clipboard / annotate / pipe side effects, so
 # it works even with save_to_file = false. Older shells: capture per the
 # user's global policy, pick the file up, and move it into the temp dir.
@@ -182,9 +219,13 @@ tmp_capture() {
     tdir=$(mktemp -d "${TMPDIR:-/tmp}/screen-toolkit-cap.XXXXXX") || exit 11
     tfile="$tdir/capture.png"
     if ipc_flags; then
+        # Noctalia appends -region to the filename pattern for region
+        # captures (including frozen and multi-output regions).
+        [ "$cmd" != "screenshot-region" ] || tfile="$tdir/capture-region.png"
         noctalia msg "$cmd" \
             --save-to-file --no-copy-to-clipboard --no-pipe-to-command \
-            --no-annotate --directory "$tdir" --filename-pattern capture \
+            --no-annotate --no-confirm-region \
+            --directory "$tdir" --filename-pattern capture \
             --format png >/dev/null 2>&1 || { rm -rf "$tdir"; exit 10; }
         await_file "$tfile" || { rm -rf "$tdir"; exit 11; }
     else
@@ -226,7 +267,9 @@ case "$ACTION" in
             # Force a saved file even when the user's policy is
             # clipboard-only, and keep the shell's own editor out of the
             # way — the annotate-* actions hand off to `annotate` themselves.
-            noctalia msg "$_cmd" --save-to-file --no-annotate >/dev/null 2>&1 || exit 10
+            noctalia msg "$_cmd" --save-to-file --no-annotate --no-confirm-region \
+                --no-copy-to-clipboard --no-pipe-to-command \
+                --directory "$_dir" >/dev/null 2>&1 || exit 10
         else
             noctalia msg "$_cmd" >/dev/null 2>&1 || exit 10
         fi

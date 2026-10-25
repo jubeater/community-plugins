@@ -300,11 +300,30 @@ Summary of every service command:
   there — and moves the picked-up file to a temporary one immediately after.
   Your own `screenshot-region` / `screenshot-fullscreen` keybinds are never
   affected.
+- Per-call intermediate captures disable region confirmation so its Copy
+  action cannot replace the required file output with a clipboard image.
+  Region captures use Noctalia's `-region` filename suffix. Keep Raw resolves
+  the merged shell configuration and uses the XDG Pictures directory when
+  the screenshot directory is empty.
+- The current screenshot IPC acknowledges launch, without reporting when
+  selection finishes or is cancelled. Region selection must complete within
+  the capture script's roughly ten-second file-pickup window (five seconds
+  on the legacy path). Cancelling can therefore show the no-file hint after
+  that window; reliable cancellation handling needs host IPC support.
 - Files are written to your configured screenshot/video directories and the
   plugin's persistent data directory (state, color history). Captures in `/tmp`
   are transient.
 - Network calls: Google Lens upload (uguu.se), share uploads (uguu.se or
   up.x02.me), and `xdg-open` for search/URL results.
+
+## Development checks
+
+Run `python3 -m unittest discover -s screen-toolkit/tests -v` from the
+repository root. These regression tests run the real capture script and
+ImageMagick against simulated Noctalia IPC, covering filename suffixes,
+annotation handoff, output routing, directory resolution, and legacy fallback.
+They do not replace a live capture and annotation test on a Noctalia build
+with per-call screenshot options.
 
 ## License
 
