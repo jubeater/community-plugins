@@ -465,6 +465,70 @@ class PanelLayerTests(unittest.TestCase):
         self.assertEqual(self.validate_layer({}, 29), [])
 
 
+class PanelContentHeightTests(unittest.TestCase):
+    def validate_panel(self, entry: dict, plugin_api: object = 42) -> list[str]:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            plugin_dir = root / "example"
+            plugin_dir.mkdir()
+            (plugin_dir / "panel.luau").write_text("", encoding="utf-8")
+            validator = validate_plugins.Validator(root)
+            validator.validate_entries(
+                plugin_dir / "plugin.toml",
+                {"plugin_api": plugin_api, "panel": [{"id": "panel", "entry": "panel.luau", **entry}]},
+                {},
+            )
+            return validator.errors
+
+    def test_accepts_content_height_from_api_42(self) -> None:
+        for api in (42, 43):
+            for placement in ("floating", "attached"):
+                with self.subTest(api=api, placement=placement):
+                    self.assertEqual(self.validate_panel(
+                        {"height": "content", "max_height": 560, "placement": placement}, api), [])
+
+    def test_rejects_content_height_below_api_42(self) -> None:
+        for api in (41, None, "42", True):
+            with self.subTest(api=api):
+                errors = self.validate_panel({"height": "content", "max_height": 560}, api)
+                self.assertTrue(any("requires plugin_api >= 42" in error for error in errors))
+
+    def test_requires_max_height_for_content(self) -> None:
+        errors = self.validate_panel({"height": "content"})
+        self.assertTrue(any("requires max_height" in error for error in errors))
+
+    def test_rejects_invalid_max_height(self) -> None:
+        for value in (0, -1, True, "560", [], {}, float("inf"), float("nan")):
+            with self.subTest(value=value):
+                errors = self.validate_panel({"height": "content", "max_height": value})
+                self.assertTrue(any("max_height must be a positive number" in error for error in errors))
+
+    def test_rejects_max_height_without_content_height(self) -> None:
+        for height in (None, 300, "fill"):
+            with self.subTest(height=height):
+                entry = {"max_height": 560}
+                if height is not None:
+                    entry["height"] = height
+                errors = self.validate_panel(entry)
+                self.assertTrue(any('max_height requires height = "content"' in error for error in errors))
+
+    def test_rejects_content_width(self) -> None:
+        errors = self.validate_panel({"width": "content"})
+        self.assertTrue(any('width must be a positive number or "fill"' in error for error in errors))
+
+    def test_rejects_persistent_content_height(self) -> None:
+        errors = self.validate_panel({"height": "content", "max_height": 560, "persistent": True})
+        self.assertTrue(any('not supported with persistent = true' in error for error in errors))
+
+    def test_preserves_numeric_and_fill_extents(self) -> None:
+        for extent in (300, 300.5, "fill"):
+            with self.subTest(extent=extent):
+                self.assertEqual(self.validate_panel({"width": extent, "height": extent}, 13), [])
+        errors = self.validate_panel({"width": "fill", "height": "content", "max_height": 560,
+                                      "placement": "attached"})
+        self.assertTrue(any('"fill" requires placement = "floating"' in error for error in errors))
+
+
 class PluginFileCountTests(unittest.TestCase):
     def validate_file_count(self, files: dict[str, int], directories: int = 0) -> list[str]:
         """`files` maps a directory inside the plugin ("" for its root) to how many it holds."""

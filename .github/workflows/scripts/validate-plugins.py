@@ -170,6 +170,7 @@ ENTRY_FIELDS = {
         "setting",
         "width",
         "height",
+        "max_height",
         "placement",
         "position",
         "layer",
@@ -740,15 +741,19 @@ class Validator:
         entry: dict[str, Any],
         plugin_api: Any,
     ) -> None:
-        # Mirrors the shell parser: a positive number (logical px) or the
-        # literal string "fill" (span the output's available extent; requires
-        # floating placement).
+        # Mirrors the shell parser: positive logical px, "fill" (floating
+        # placement), or height = "content" with a required cap from API 42.
         uses_fill = False
+        uses_content_height = entry.get("height") == "content"
         for field in ("width", "height"):
             if field not in entry:
                 continue
 
             value = entry[field]
+            if field == "height" and uses_content_height:
+                if not is_int(plugin_api) or plugin_api < 42:
+                    self.add_context_error(manifest_path, context, 'height "content" requires plugin_api >= 42')
+                continue
             if isinstance(value, str):
                 if value != "fill":
                     self.add_context_error(manifest_path, context, f'{field} must be a positive number or "fill"')
@@ -759,6 +764,18 @@ class Validator:
 
         if uses_fill and entry.get("placement", "floating") != "floating":
             self.add_context_error(manifest_path, context, 'width/height "fill" requires placement = "floating"')
+
+        if "max_height" in entry:
+            if not uses_content_height:
+                self.add_context_error(manifest_path, context, 'max_height requires height = "content"')
+            value = entry["max_height"]
+            if not is_number(value) or not math.isfinite(value) or value <= 0:
+                self.add_context_error(manifest_path, context, "max_height must be a positive number")
+        elif uses_content_height:
+            self.add_context_error(manifest_path, context, 'height "content" requires max_height')
+
+        if uses_content_height and entry.get("persistent") is True:
+            self.add_context_error(manifest_path, context, 'height "content" is not supported with persistent = true')
 
         if "placement" in entry:
             placement = entry["placement"]
