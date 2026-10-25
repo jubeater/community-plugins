@@ -16,7 +16,7 @@ not the original implementation.
 | Field | Value |
 | --- | --- |
 | ID | `alexander/screen-toolkit` |
-| Entries | Bar widget: `widget`; control-center shortcut: `toggle`; panels: `panel` (standard tools), `panel-legacy` (legacy layout), `result` (result view); service: `service` |
+| Entries | Bar widget: `widget`; control-center shortcut: `toggle`; panels: `panel` (tools, reused by every tool + layout), `result` (result view, reused by every result), `pick` (Umbriel window picker); service: `service` |
 
 ## Requirements
 
@@ -30,13 +30,12 @@ only pixel processing and recording need external tools.
 - **`tesseract`** — OCR engine (plus your language packs, e.g. `tesseract-data-eng`)
 - **`imagemagick`** — image processing
 - **`zbar`** — QR / barcode scanning (`zbarimg`)
+- **`qrencode`** — QR image for shared links (phone handoff); skipped if missing
 - **`curl`** + **`jq`** — image uploads (uguu.se / x02.me) and Google Lens
 - **`ffmpeg`** + **`ffprobe`** — recording / GIF conversion and thumbnail generation
-- **`bc`** — GIF duration and frame-rate calculations
 - **`stat`** — recording file size
 - **`pkill`** — stopping active recording backends
-- **`xdg-open`** — opening URLs, OCR search results, and shared-link targets
-- **`mpv`** — open recording preview in legacy mode subpanel
+- **`xdg-open`** — opening URLs, recording previews, and shared-link targets
 - **`pactl`** — resolve the default audio source for single-source wf-recorder / wl-screenrec recording
 
 Recording requires at least one backend:
@@ -48,8 +47,9 @@ Recording requires at least one backend:
 Optional:
 
 - **`translate-shell`** (`trans`) — OCR translation
-- **`hyprctl`** — window geometry and hover highlight for Annotate Window (Hyprland; the highlight needs a Lua-dispatch build)
+- **`hyprctl`** — window geometry for Annotate Window snapping (Hyprland)
 - **`niri`** — Annotate Window on Niri captures the focused window
+- **`umbriel`** — Annotate Window on Umbriel shows a window picker
 
 Screenshots and annotation use the shell's own screenshot stack
 (`screenshot-region`, `screenshot-fullscreen`, `annotate`). On Noctalia
@@ -60,9 +60,8 @@ nothing in your screenshots folder — so these tools work even with file
 saving disabled in Settings → Screenshot. On older builds the plugin falls
 back to the shell's global capture policy (file saving must be enabled) and
 moves the file out of the screenshots folder afterwards. `Annotate Window`
-hovers to aim — everything dims except the window under the cursor — then
-the click captures that window. On Niri it captures the focused window
-directly.
+snaps to the clicked window on Hyprland. Umbriel shows a window picker,
+Niri captures the focused window, and other compositors fall back to a region.
 
 ## Usage
 
@@ -72,10 +71,10 @@ Settings → Control Center shortcuts. Left-click either one opens the main pane
 a recording is active, the widget and shortcut show a pulsing red dot.
 
 The main panel has two layouts, selected by the `panel-mode` setting (default:
-**Standard**):
+**Standard**) — both render inside the single reused `panel` entry:
 
-- **Standard** — a dense grid grouped into tinted sections (`panel`, 380×260).
-- **Legacy** — recreates the Noctalia-v4 layout (`panel-legacy`, 380×260).
+- **Standard** — a dense grid grouped into tinted sections (380×260).
+- **Legacy** — recreates the Noctalia-v4 layout (same 380×260 entry).
 
 ### Legacy mode
 Legacy mode recreates the original Noctalia v4 screen-toolkit layout:
@@ -86,10 +85,10 @@ Legacy mode recreates the original Noctalia v4 screen-toolkit layout:
 - Preview and one-click access to the most recent screenshot or recording.
 - Quick microphone and system audio toggles in the `Record` subpanel.
 
-The widget and shortcut open the panel matching the `panel-mode` setting; the
+The widget and shortcut always open the single `panel` entry; the
 panel footnote under Settings → Plugins shows placement/position options.
 
-Toggle the tools panel (opens the panel matching `panel-mode`):
+Toggle the tools panel (single reused entry):
 
 ```sh
 noctalia msg plugin alexander/screen-toolkit:service all toggle
@@ -101,22 +100,23 @@ For example, bind it to `SUPER+P` in Hyprland:
 bind = SUPER, P, exec, noctalia msg plugin alexander/screen-toolkit:service all toggle
 ```
 
-Open the standard tools panel:
+Open the tools panel (single entry, reused for standard + legacy layouts):
 
 ```sh
 noctalia msg panel-toggle alexander/screen-toolkit:panel
 ```
 
-Open the legacy tools panel (the 4×2 grid with subpanels):
-
-```sh
-noctalia msg panel-toggle alexander/screen-toolkit:panel-legacy
-```
-
-Open the result panel (shows the last capture/recording output):
+Open the result panel (single entry, reused for every tool output):
 
 ```sh
 noctalia msg panel-toggle alexander/screen-toolkit:result
+```
+
+The Umbriel window picker is normally populated and opened by **Markup Window**.
+Its panel IPC command is:
+
+```sh
+noctalia msg panel-toggle alexander/screen-toolkit:pick
 ```
 
 The tools panel contains the capture actions. When a capture tool finishes, a
@@ -126,10 +126,13 @@ the tools panel.
 Region tools (OCR, QR, Palette, Lens, Measure, Markup) use the shell's
 interactive region overlay — drag to select a region, then release. Region
 recording draws a `slurp` crosshair instead, to get a geometry for the
-external recorder. Recording starts immediately and the bar widget shows the
-pulsing dot; click the dot, the widget, the shortcut, or the panel's **Stop**
+external recorder. Recording starts immediately and the bar widget
+shows the pulsing dot with elapsed time; open the panel and use its **Stop**
 button to end it. Unless "Skip Save Confirmation" is on, the panel then
-offers **Save MP4**, **Save GIF**, **Copy**, and **Discard**.
+offers **Save MP4**, **Save GIF**, **Copy**, and **Discard** with a GIF size
+hint. Closing the card without choosing discards the recording as if it
+never happened; Save/Copy is the explicit way to keep it. The preview
+thumbnail is deleted on save or discard.
 
 The `hide-cursor` setting excludes the cursor from **recordings** (default:
 hidden). Screenshots follow the shell's own screenshot cursor setting.
@@ -141,20 +144,23 @@ depends on the compositor.
   shell's annotation editor; Copy and Save deliver the annotated PNG per the
   shell's screenshot policy, so only what you explicitly keep leaves a file
   behind. Enable **Keep Raw Markup Captures** to also save the un-annotated
-  capture to your screenshots folder (the pre-1.6 behavior). **Markup FS**
-  captures the focused monitor. **Markup Window** dims the screen except the
-  hovered window — click captures that window (Hyprland; Niri captures the
-  focused window instead); its uncropped monitor frame is always temporary
-  and never kept.
+  capture to your screenshots folder (the v2.0 behavior). This setting applies
+  to region and fullscreen captures. **Markup FS** captures the focused monitor.
+  **Markup Window** snaps to the clicked window (Hyprland), shows a window
+  picker (Umbriel), or captures the focused window (Niri). Other compositors
+  fall back to a region. The uncropped monitor frame used for window crops
+  is always temporary and never kept.
 - **Measure** reports the region's pixel size and copies it to the clipboard.
 - **OCR** extracts text and copies it to the clipboard. The result includes the
   capture preview and an editable multiline text area, so you can correct, trim,
-  or extend the OCR output before copying, searching, translating, or sharing
-  it. Detected URLs can be opened directly and detected email addresses can
-  open a mail composer.
+  or extend the OCR output, plus a single tool row (retry with PSM 3/6/7/11 +
+  language on the left, translate on the right) that re-runs on the same
+  pixels without recapturing. Detected URLs can be opened directly and
+  detected email addresses can open a mail composer.
 - **QR** decodes a code and copies the text to the clipboard.
 - **Palette** copies the extracted hex colors (one per line) to the clipboard.
-- **Share** uploads the current capture and copies the link (uguu.se by default,
+- **Share** uploads the current capture and opens a share card: QR code for
+  phone handoff, expiry countdown, and upload history (uguu.se by default,
   or up.x02.me with an API key).
 
 Results are delivered to the clipboard with a notification — the panel itself
@@ -173,7 +179,6 @@ All settings live in Settings → Plugins (gear on the plugin's row).
 | `video-path` | `folder` | `~/Videos` | Where recordings are saved. |
 | `filename-format` | `string` | `%Y-%m-%d_%H-%M-%S` | Filename template; the extension is added automatically. |
 | `selected-ocr-lang` | `string` | `eng` | Tesseract language code; combine with `+` (e.g. `eng+fra`). |
-| `search-engine-url` | `string` | *(Google)* | Search URL prefix, or a URL containing `{text}`. The OCR text is URL-encoded. |
 | `x02-api-key` | `string` | *(empty)* | up.x02.me key for longer-lived, larger uploads. |
 | `x02-expiry` | `select` | `7d` | Link lifetime when an x02 key is set: `1h`, `1d`, `7d`, `30d`, or `permanent`. |
 | `share-skip-popover` | `bool` | `false` | Compatibility setting retained from v4. The v5 result panel copies share links directly. |
@@ -209,14 +214,14 @@ noctalia msg plugin alexander/screen-toolkit:service all recordFullscreen
 noctalia msg plugin alexander/screen-toolkit:service all recordFullscreenMp4
 noctalia msg plugin alexander/screen-toolkit:service all recordStop
 noctalia msg plugin alexander/screen-toolkit:service all recordSave
-noctalia msg plugin alexander/screen-toolkit:service all recordCopy
 noctalia msg plugin alexander/screen-toolkit:service all recordDiscard
-noctalia msg plugin alexander/screen-toolkit:service all ocrSearch
+noctalia msg plugin alexander/screen-toolkit:service all ocrRetry
 noctalia msg plugin alexander/screen-toolkit:service all clearResult
 noctalia msg plugin alexander/screen-toolkit:service all clearHistory
+noctalia msg plugin alexander/screen-toolkit:service all clearShareHistory
 ```
 
-`toggle` opens the panel matching the `panel-mode` setting. The bar widget and
+`toggle` opens the single reused tools panel. The bar widget and
 control-center shortcut use the same logic.
 
 Commands that take a payload:
@@ -224,21 +229,17 @@ Commands that take a payload:
 ```sh
 # Translate the current OCR text into a language (language code payload)
 noctalia msg plugin alexander/screen-toolkit:service all ocrTranslate en
-# Search the current OCR text (or a payload.text) with the configured engine
-noctalia msg plugin alexander/screen-toolkit:service all ocrSearch
 # Share a file on disk (absolute path payload)
 noctalia msg plugin alexander/screen-toolkit:service all share /path/to/image.png
 # Save the finished recording (payload format: "gif" or "mp4")
 noctalia msg plugin alexander/screen-toolkit:service all recordSave mp4
-# Show or hide the cursor in captures (payload: "true" or "false")
-noctalia msg plugin alexander/screen-toolkit:service all setCursorHidden true
 ```
 
 Summary of every service command:
 
 | Command | Payload | Action |
 | --- | --- | --- |
-| `toggle` | — | Open/close the tools panel (matches `panel-mode`) |
+| `toggle` | — | Open/close the single reused tools panel |
 | `colorPicker` | — | Pick a color from the screen (hyprpicker magnifier) |
 | `ocr` | — | Extract text from a region |
 | `qr` | — | Decode a QR / barcode from a region |
@@ -254,30 +255,28 @@ Summary of every service command:
 | `recordFullscreenMp4` | — | Record the full screen as MP4 |
 | `recordStop` | — | Stop the active recording |
 | `recordSave` | `"gif"` / `"mp4"` | Save the finished recording |
-| `recordCopy` | — | Finalize to MP4 and copy the file URI |
 | `recordDiscard` | — | Discard the finished recording |
-| `ocrSearch` | optional `{text}` | Search OCR text with the configured engine |
 | `ocrTranslate` | language code | Translate OCR text |
-| `share` | file path | Upload a file and copy the link |
+| `ocrRetry` | `{psm, lang}` | Re-run OCR on the same capture with a forced PSM (3/4/6/7/11) and/or language |
+| `share` | file path | Upload a file, copy the link, open the share card (QR + history) |
 | `clearResult` | — | Clear the current result panel state |
 | `clearHistory` | — | Clear the color history |
-| `setCursorHidden` | \"true\" / \"false\" | Exclude/include the cursor in recordings |
+| `clearShareHistory` | — | Clear the upload history |
 
 ## Notes
 
-- **Two panel entries, one layout setting.** Panel size is host-owned: the host
+- **One tools panel, one result panel.** Panel size is host-owned: the host
   sizes each `[[panel]]` entry from its `width`/`height`, and there is no runtime
-  resize. So the two layouts are two entries sharing `panel.luau`:
-  `panel` (380×260, the standard grid) and `panel-legacy` (380×260, the legacy grid).
-  The `panel-mode` setting picks which one `toggle` opens; changing the setting
-  only affects which panel opens next time; an already-open panel keeps its
+  resize. So both layouts (standard + legacy, plus the annotate/record
+  subviews) render inside the single reused `panel` entry (380×260); the
+  `panel-mode` setting only switches the layout inside it. Every tool result
+  reuses the single `result` entry. An already-open panel keeps its
   current size until closed.
 - This is a port of the legacy v4
   [screen-toolkit](https://github.com/noctalia-dev/legacy-v4-plugins/tree/main/screen-toolkit)
   plugin. Tools that relied on freeform v4 QML overlays are adapted: region
   selection and annotation go through the shell's screenshot stack, window
-  aiming dims everything except the hovered window (`hyprctl dim_around` on
-  Hyprland), and measure reports region dimensions instead of drawing a line
+  snapping clicks straight to the window under the cursor (Hyprland), and measure reports region dimensions instead of drawing a line
   overlay. **Pin** (floating screen overlays) and **Webcam Mirror** could not
   be ported — the v5 plugin UI has no canvas or always-on-top surfaces — so
   they are not included.

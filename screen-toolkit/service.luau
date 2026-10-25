@@ -19,15 +19,16 @@
 -- crops) runs over that file with `tesseract` / `zbarimg` / `magick` /
 -- `curl`. Annotation opens the shell's own editor (`annotate <file>`); the
 -- window capture lets you click one and snaps to it with `hyprctl` (or
--- takes the focused one on `niri`). Only region *recording* still uses
+-- takes the focused one on `niri`). Other compositors fall back to a
+-- manual region; Umbriel uses its window picker. Only region *recording* uses
 -- `slurp`, to get a geometry for the external recorder backends.
 --
 -- Recording runs `wl-screenrec` (preferred) or `wf-recorder`. The raw output
 -- lands in /tmp as MP4; GIF is produced on save via record.sh convert-gif.
 
 local PANEL_ID = "alexander/screen-toolkit:panel"
-local LEGACY_PANEL_ID = "alexander/screen-toolkit:panel-legacy"
 local RESULT_PANEL_ID = "alexander/screen-toolkit:result"
+local PICK_PANEL_ID = "alexander/screen-toolkit:pick"
 
 local SCRIPT_CAPTURE = noctalia.pluginDir() .. "/scripts/capture.sh"
 local SCRIPT_SHELL = noctalia.pluginDir() .. "/scripts/shell-capture.sh"
@@ -66,8 +67,14 @@ end
 -- Compositor detection. `niri msg` talks over a socket whose path niri exports
 -- as NIRI_SOCKET; when that is set we route annotate-window through the niri
 -- capture script, otherwise we fall back to the Hyprland path (hyprctl).
+-- Umbriel exports UMBRIEL_SOCKET and gets its own focused-window path
+-- (slurp cannot run there, so no click-to-pick: same deal as Niri).
 local function isNiri()
   return (noctalia.getenv("NIRI_SOCKET") or "") ~= ""
+end
+
+local function isUmbriel()
+  return (noctalia.getenv("UMBRIEL_SOCKET") or "") ~= ""
 end
 
 -- Whether the cursor is excluded from recordings. Screenshots follow the
@@ -166,6 +173,9 @@ local SHELL_TIMEOUT_EDIT = 30000
 local function shellCapture(argv, timeout, onFile)
   noctalia.runAsync(argv, function(res)
     if res.exitCode == 10 then return end -- cancelled, silent
+    if res.exitCode ~= 0 then
+      log(`capture '{table.concat(argv, " ")}' exit={res.exitCode} out={trim(res.stdout or "")}`)
+    end
     if res.exitCode == 11 then
       noctalia.notifyError(noctalia.tr("messages.no_file"))
       return
@@ -258,6 +268,7 @@ end
 local DATA_DIR = noctalia.pluginDataDir()
 local RESULTS_FILE = DATA_DIR .. "/results.json"
 local HISTORY_FILE = DATA_DIR .. "/color-history.json"
+local SHARE_HISTORY_FILE = DATA_DIR .. "/share-history.json"
 
 local function loadState()
   local raw = noctalia.readFile(RESULTS_FILE)
@@ -277,6 +288,11 @@ local function loadState()
     local d = noctalia.json.decode(hraw)
     if type(d) == "table" then publish("colorHistory", d) end
   end
+  local sraw = noctalia.readFile(SHARE_HISTORY_FILE)
+  if sraw then
+    local d = noctalia.json.decode(sraw)
+    if type(d) == "table" then publish("shareHistory", d) end
+  end
 end
 
 local function saveResults()
@@ -294,6 +310,10 @@ local function saveResults()
   local h = noctalia.state.get("colorHistory") or {}
   local henc = noctalia.json.encode(h)
   if henc then noctalia.writeFile(HISTORY_FILE, henc) end
+
+  local sh = noctalia.state.get("shareHistory") or {}
+  local senc = noctalia.json.encode(sh)
+  if senc then noctalia.writeFile(SHARE_HISTORY_FILE, senc) end
 end
 
 local function pushHistory(hex)
@@ -393,25 +413,6 @@ local function runOcr()
   end)
 end
 
-local function ocrSearch(payload)
-  local result = noctalia.state.get("ocrResult")
-  local text = if type(payload) == "table" and type(payload.text) == "string"
-    then payload.text
-    else type(result) == "table" and result.text or nil
-  if not text or text == "" then return end
-  local url = cfg("search-engine-url")
-  if url == nil or url == "" then
-    url = "https://www.google.com/search?q="
-  end
-  local encoded = noctalia.string.urlEncode(text)
-  if url:find("{text}", 1, true) then
-    url = url:gsub("{text}", function() return encoded end)
-  else
-    url = url .. encoded
-  end
-  noctalia.runAsync({ "xdg-open", url })
-end
-
 local function ocrTranslate(payload)
   local result = noctalia.state.get("ocrResult")
   local text = if type(payload) == "table" and type(payload.text) == "string"
@@ -437,6 +438,67 @@ local function ocrTranslate(payload)
     -- strip BOM FEFF that trans emits in bidi mode
     out = out:gsub("^\239\187\191", "")
     publish("translateResult", out)
+  end)
+end
+
+local function ocrRetry(payload)
+  if ocrRunning then
+    noctalia.notify(noctalia.tr("panel.running"))
+    return
+  end
+  local result = noctalia.state.get("ocrResult")
+  local path = if type(result) == "table" then result.capturePath else nil
+  if not path or path == "" then
+    noctalia.notifyError(noctalia.tr("messages.no_text"))
+    return
+  end
+  local psm, lang = nil, cfg("selected-ocr-lang") or "eng"
+  local function validPsm(v)
+    v = tostring(v)
+    if v == "3" or v == "4" or v == "6" or v == "7" or v == "11" then return v end
+    return nil
+  end
+  if type(payload) == "table" then
+    psm = validPsm(payload.psm)
+    if type(payload.lang) == "string" and payload.lang ~= "" then lang = payload.lang end
+  elseif type(payload) == "string" and payload ~= "" then
+    psm = validPsm(payload)
+    if not psm then lang = payload end
+  elseif type(payload) == "number" then
+    psm = validPsm(payload)
+  end
+  ocrRunning = true
+  ocrSerial = ocrSerial + 1
+  local serial = ocrSerial
+  local args = { SCRIPT_OCR, path, lang }
+  if psm then args[#args + 1] = psm end
+  noctalia.runAsync(args, function(res)
+    ocrRunning = false
+    if res.exitCode == 1 then
+      noctalia.notifyError(noctalia.tr("messages.missing_dep", { dep = trim(res.stdout or "") }))
+      return
+    elseif res.exitCode ~= 0 then
+      noctalia.notifyError(noctalia.tr(OCR_EXIT_KEYS[res.exitCode] or "ocr.exit_unknown", { code = tostring(res.exitCode) }))
+      return
+    end
+    local text = trim(res.stdout or "")
+    if text == "" then
+      noctalia.notifyError(noctalia.tr("messages.no_text"))
+      return
+    end
+    noctalia.copyToClipboard(text, "text/plain;charset=utf-8")
+    local gw, gh = 0, 0
+    if type(result) == "table" then gw, gh = tonumber(result.gw) or 0, tonumber(result.gh) or 0 end
+    publish("ocrResult", {
+      text = text,
+      capturePath = path,
+      cacheBust = tostring(os.time()) .. "-r" .. tostring(serial),
+      gw = gw,
+      gh = gh,
+    })
+    publish("translateResult", nil)
+    publish("activeTool", "ocr")
+    saveResults()
   end)
 end
 
@@ -536,7 +598,7 @@ end
 -- Markup: capture + editor handoff. With "annotate-keep-raw" off (default)
 -- the raw capture stays in a plugin-owned temp file and only the editor's
 -- Copy / Save output reaches the user's outputs; with it on, the raw is
--- kept in the shell's screenshot folder (pre-1.6 behavior).
+-- kept in the shell's screenshot folder (v2.0 behavior).
 local function annotateArgv(action)
   if cfg("annotate-keep-raw") == true then
     return { SCRIPT_SHELL, action, "keep" }
@@ -571,8 +633,47 @@ local function annotateWindow()
     end, SHELL_TIMEOUT_QUICK)
     return
   end
+  if isUmbriel() then
+    local sock = noctalia.getenv("UMBRIEL_SOCKET") or ""
+    if sock == "" or not noctalia.commandExists("umbriel") then
+      noctalia.notify(noctalia.tr("messages.window_snap_fallback"))
+      annotateRegion()
+      return
+    end
+    -- Click-to-choose: list windows, open the picker, snap on choice.
+    noctalia.runAsync({ "env", "UMBRIEL_SOCKET=" .. sock, "umbriel", "windows", "--json" }, function(res)
+      local list = {}
+      if res.exitCode == 0 then
+        local d = noctalia.json.decode(res.stdout or "")
+        if type(d) == "table" then
+          for _, w in ipairs(d) do
+            if type(w) == "table" and w.visible == true and w.minimized ~= true and w.tab_hidden ~= true
+              and type(w.id) == "string" and w.id ~= "" and type(w.w) == "number" and w.w > 0
+              and type(w.h) == "number" and w.h > 0 then
+              table.insert(list, {
+                id = w.id,
+                app = tostring(w.app_id or "?"),
+                title = tostring(w.title or ""),
+                focused = w.focused == true,
+              })
+            end
+          end
+        end
+      end
+      if #list == 0 then
+        noctalia.notifyError(noctalia.tr("messages.no_window"))
+        return
+      end
+      publish("pickList", list)
+      noctalia.togglePanel(PICK_PANEL_ID)
+    end, 15000)
+    return
+  end
   if not noctalia.commandExists("hyprctl") then
-    noctalia.notifyError(noctalia.tr("messages.missing_dep", { dep = "hyprctl" }))
+    -- No window-query API on this compositor (Wayland offers none): fall
+    -- back to a manual region instead of failing.
+    noctalia.notify(noctalia.tr("messages.window_snap_fallback"))
+    annotateRegion()
     return
   end
   shellCapture({ SCRIPT_SHELL, "annotate-window" }, SHELL_TIMEOUT_INTERACTIVE, afterAnnotate)
@@ -593,6 +694,7 @@ local recordState = "idle" -- idle | recording | converting | ready
 local recordFormat = "mp4"
 local rawPath = ""
 local recordPath = ""
+local recordThumbPath = ""
 local recordStartedAt = nil
 
 local function refreshRecorders()
@@ -769,6 +871,14 @@ local function launchRecord(geom, format, bin, device)
   recordFormat = if format == "gif" then "gif" else "mp4"
   publish("recordFormat", recordFormat)
   recordPath = ""
+  recordThumbPath = rawPath:gsub("%.mp4$", "-thumb.png")
+  publish("rawRecordPath", rawPath)
+  -- Drop the previous recording's thumb now (nothing references it anymore:
+  -- a new stop chain always publishes a fresh path before opening the card).
+  local prevThumb = noctalia.state.get("recordThumb")
+  if type(prevThumb) == "string" and prevThumb ~= "" and prevThumb ~= recordThumbPath then
+    noctalia.runAsync({ "rm", "-f", prevThumb })
+  end
   local argv = buildRecorderArgv(bin, geom, rawPath, device)
   log(`starting recording: {table.concat(argv, " ")}`)
   if #argv == 0 then
@@ -791,7 +901,6 @@ local function launchRecord(geom, format, bin, device)
   end
   recordStartedAt = os.time()
   setRecordState("recording")
-  noctalia.notify(noctalia.tr("plugin_name"), noctalia.tr("messages.recording_started"))
 end
 
 local function startRecord(geom, format, bin)
@@ -854,6 +963,8 @@ local function parseRecordInfo(raw)
 end
 
 local function finalizeRecord(format, copyToClipboard)
+  if rawPath == "" then rawPath = noctalia.state.get("rawRecordPath") or "" end
+  if recordThumbPath == "" then recordThumbPath = noctalia.state.get("recordThumb") or "" end
   if rawPath == "" then return end
   local destDir = videoDir()
   local ext
@@ -876,6 +987,10 @@ local function finalizeRecord(format, copyToClipboard)
     end
     recordPath = dest
     rawPath = ""
+    publish("rawRecordPath", "")
+    if recordThumbPath ~= "" then noctalia.runAsync({ "rm", "-f", recordThumbPath }) end
+    recordThumbPath = ""
+    publish("recordThumb", "")
     setRecordState("idle")
     if copyToClipboard then
       copyFileUri(dest)
@@ -887,9 +1002,18 @@ local function finalizeRecord(format, copyToClipboard)
 end
 
 local function recordStop()
-  if recordState ~= "recording" then return end
+  -- Survive a service reload mid-recording: the shell-held state outlives
+  -- our locals, so recover the raw path instead of orphaning the recorder.
+  if recordState ~= "recording" and noctalia.state.get("recording") ~= true then return end
+  if rawPath == "" then rawPath = noctalia.state.get("rawRecordPath") or "" end
+  if rawPath == "" then
+    setRecordState("idle")
+    return
+  end
+  recordState = "recording"
+  recordThumbPath = rawPath:gsub("%.mp4$", "-thumb.png")
   setRecordState("converting")
-  noctalia.notify(noctalia.tr("plugin_name"), noctalia.tr("messages.recording_stopped"))
+  -- No "stopped" popup: the save card appearing is the confirmation.
   -- rawPath is unique per recording, so pkill scopes to our recorder only and
   -- never touches the built-in screen recorder's process. pkill never matches
   -- itself, and direct exec leaves no wrapper shell to match either.
@@ -909,7 +1033,10 @@ local function recordStop()
       else
         -- Extract a mid-frame thumbnail so the result panel can preview the
         -- recording, then probe it for size / duration / resolution.
-        noctalia.runAsync({ SCRIPT_RECORD, "thumb", rawPath }, function()
+        -- Thumb path is unique per recording so overlapping stop/start
+        -- chains can never steal or delete each other's preview.
+        noctalia.runAsync({ SCRIPT_RECORD, "thumb", rawPath, recordThumbPath }, function(res)
+          log(`thumb exit={res and res.exitCode} out={res and trim(res.stdout or "")}`)
           noctalia.runAsync({ "ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", rawPath }, function(durRes)
             local duration = trim(durRes.stdout or "")
             noctalia.runAsync({ "ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "csv=s=x:p=0", rawPath }, function(whRes)
@@ -917,23 +1044,29 @@ local function recordStop()
               noctalia.runAsync({ "stat", "-c", "%s", rawPath }, function(statRes)
                 local size = trim(statRes.stdout or "")
                 publish("recordInfo", parseRecordInfo(`{duration}|{wh}|{size}`))
+                publish("recordThumb", recordThumbPath)
                 setRecordState("ready")
                 noctalia.togglePanel(RESULT_PANEL_ID)
               end)
-            end)
-          end)
-        end)
+            end, 15000)
+          end, 15000)
+        end, 15000)
       end
     end)
   end)
 end
 
 local function recordDiscard()
+  if rawPath == "" then rawPath = noctalia.state.get("rawRecordPath") or "" end
+  if recordThumbPath == "" then recordThumbPath = noctalia.state.get("recordThumb") or "" end
   if rawPath ~= "" then
     noctalia.runAsync({ "rm", "-f", rawPath })
     rawPath = ""
   end
-  -- clean up old thumb so it doesn't stay stuck in preview
+  publish("rawRecordPath", "")
+  if recordThumbPath ~= "" then noctalia.runAsync({ "rm", "-f", recordThumbPath }) end
+  recordThumbPath = ""
+  publish("recordThumb", "")
   setRecordState("idle")
 end
 
@@ -956,8 +1089,33 @@ local SHARE_EXIT_KEYS = {
 
 -- ── Sharing ────────────────────────────────────────────────────────────────
 
+local function expirySecs(expiry, hasKey)
+  if not hasKey then return 3 * 3600 end
+  if expiry == "1h" then return 3600 end
+  if expiry == "1d" then return 86400 end
+  if expiry == "7d" then return 7 * 86400 end
+  if expiry == "30d" then return 30 * 86400 end
+  return nil
+end
+
+local function pushShareHistory(entry)
+  local h = noctalia.state.get("shareHistory") or {}
+  table.insert(h, 1, entry)
+  while #h > 8 do table.remove(h) end
+  publish("shareHistory", h)
+  local enc = noctalia.json.encode(h)
+  if enc then noctalia.writeFile(SHARE_HISTORY_FILE, enc) end
+end
+
 local function shareFile(file)
   if file == nil or file == "" then
+    noctalia.notifyError(noctalia.tr("messages.share_bad_args"))
+    return
+  end
+  if type(file) == "table" then
+    file = file.path or file.file or ""
+  end
+  if type(file) ~= "string" or file == "" then
     noctalia.notifyError(noctalia.tr("messages.share_bad_args"))
     return
   end
@@ -977,9 +1135,34 @@ local function shareFile(file)
         return
       end
       noctalia.copyToClipboard(url, "text/plain;charset=utf-8")
-      noctalia.notify(noctalia.tr("panel.share_url"), url)
+      local entry = {
+        url = url,
+        file = file,
+        time = os.time(),
+        expiry = expiry,
+        expirySecs = expirySecs(expiry, apiKey ~= ""),
+      }
+      pushShareHistory(entry)
+      publish("shareResult", entry)
+      publish("shareQrPath", "")
+      publish("activeTool", "share")
+      saveResults()
+      noctalia.togglePanel(RESULT_PANEL_ID)
+      if noctalia.commandExists("qrencode") then
+        local qrPath = string.format("/tmp/st-share-qr-%d.png", os.time())
+        noctalia.runAsync({ "qrencode", "-o", qrPath, "-s", "6", "-m", "2", url }, function(qrRes)
+          if qrRes.exitCode == 0 then publish("shareQrPath", qrPath) end
+        end)
+      end
     end
   )
+end
+
+local function clearShareHistory()
+  publish("shareHistory", {})
+  publish("shareResult", nil)
+  publish("shareQrPath", "")
+  noctalia.writeFile(SHARE_HISTORY_FILE, "[]")
 end
 
 -- ── Result housekeeping ────────────────────────────────────────────────────
@@ -1001,12 +1184,6 @@ local function clearHistory()
   saveResults()
 end
 
-local function setCursorHidden(payload)
-  cursorHidden = payload ~= "false"
-  publish("cursorHidden", cursorHidden)
-  log(`cursor hidden: {tostring(cursorHidden)}`)
-end
-
 -- ── Dispatch ───────────────────────────────────────────────────────────────
 
 local function runRecordRegion(format)
@@ -1024,20 +1201,18 @@ local function runRecordFullscreen(format)
 end
 
 local HANDLERS = {
-  colorPicker = runColorPicker, ocr = runOcr, qr = runQr, palette = runPalette, lens = runLens, measure = runMeasure,
+  colorPicker = runColorPicker, ocr = runOcr, ocrRetry = ocrRetry, qr = runQr, palette = runPalette, lens = runLens, measure = runMeasure,
   annotate = annotateRegion, annotateFullscreen = annotateFullscreen, annotateWindow = annotateWindow,
   record = function() runRecordRegion("gif") end, recordMp4 = function() runRecordRegion("mp4") end,
   recordFullscreen = function() runRecordFullscreen("gif") end, recordFullscreenMp4 = function() runRecordFullscreen("mp4") end,
   recordStop = recordStop,
   recordSave = function(payload) finalizeRecord((type(payload) == "table" and payload.format or nil) or recordFormat, false) end,
-  recordCopy = function() finalizeRecord(recordFormat, true) end, recordDiscard = recordDiscard,
-  ocrSearch = ocrSearch, ocrTranslate = ocrTranslate, share = shareFile, clearResult = clearResult, clearHistory = clearHistory, setCursorHidden = setCursorHidden,
+  recordDiscard = recordDiscard,
+  ocrTranslate = ocrTranslate, share = shareFile, clearShareHistory = clearShareHistory, clearResult = clearResult, clearHistory = clearHistory,
   setAudioOut = function(payload) overrideAudioOut = (type(payload) == "table" and payload.value or payload) == true end,
   setAudioIn = function(payload) overrideAudioIn = (type(payload) == "table" and payload.value or payload) == true end,
   toggle = function()
-    local mode = cfg("panel-mode")
-    local id = mode == "legacy" and LEGACY_PANEL_ID or PANEL_ID
-    noctalia.togglePanel(id)
+    noctalia.togglePanel(PANEL_ID)
   end,
 }
 
@@ -1071,17 +1246,33 @@ noctalia.state.watch("command", function(cmd)
   end
 end)
 
+-- Window picker choice: snap the chosen Umbriel window and annotate it.
+noctalia.state.watch("pickChoice", function(id)
+  if type(id) ~= "string" or id == "" then return end
+  noctalia.state.set("pickChoice", "")
+  local sock = noctalia.getenv("UMBRIEL_SOCKET") or ""
+  if sock == "" or not noctalia.commandExists("umbriel") then
+    noctalia.notifyError(noctalia.tr("messages.missing_dep", { dep = "umbriel" }))
+    return
+  end
+  shellCapture({ SCRIPT_SHELL, "annotate-window-id", id, sock }, SHELL_TIMEOUT_INTERACTIVE, afterAnnotate)
+end)
+
 function onIpc(event, payload)
   dispatch(event, payload)
 end
 
 -- ── Boot ───────────────────────────────────────────────────────────────────
 
+local function pruneTmp()
+  noctalia.runAsync({ "sh", "-c", "find /tmp -maxdepth 1 -name 'st-capture-*' -mtime +7 -delete; find /tmp -maxdepth 1 -name 'screen-toolkit-record-*-thumb.png' -mtime +7 -delete; find /tmp -maxdepth 1 -name 'screen-toolkit-ocr-work-*' -mtime +1 -delete; find /tmp -maxdepth 1 -name 'st-share-qr-*.png' -mtime +7 -delete; find /tmp -maxdepth 1 -name 'st-blur-*.png' -mtime +7 -delete" })
+end
+
 local function boot()
   noctalia.mkdirAll(DATA_DIR)
+  pruneTmp()
   loadState()
   cursorHidden = cfg("hide-cursor") ~= false
-  publish("cursorHidden", cursorHidden)
   refreshRecorders()
 end
 
@@ -1091,7 +1282,6 @@ function onConfigChanged()
   local nextCursorHidden = cfg("hide-cursor") ~= false
   if nextCursorHidden ~= cursorHidden then
     cursorHidden = nextCursorHidden
-    publish("cursorHidden", cursorHidden)
   end
   refreshRecorders()
 end

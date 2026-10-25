@@ -66,6 +66,33 @@ else:
 print('ok')  # ACK does not wait for an asynchronous capture.
 '''
 
+WINDOW_SHIM = r'''#!/usr/bin/env python3
+import json, os, pathlib, sys
+tool = pathlib.Path(sys.argv[0]).name
+root = pathlib.Path(os.environ['TEST_ROOT'])
+with (root/'window-calls.jsonl').open('a') as f:
+    f.write(json.dumps([tool, sys.argv[1:], os.environ.get('UMBRIEL_SOCKET', '')])+'\n')
+if tool == 'slurp':
+    print('2,2 1x1')
+elif tool == 'hyprctl':
+    if sys.argv[1] == 'clients':
+        print(json.dumps([dict(mapped=True, address='0x1', at=[1,1], size=[4,3], focusHistoryID=0)]))
+    elif sys.argv[1] == 'monitors':
+        print(json.dumps([dict(x=0, y=0, width=8, height=6, scale=1)]))
+    else:
+        sys.exit(1)
+elif sys.argv[1] == 'windows':
+    print(json.dumps([
+        dict(id='focused', visible=True, focused=True, x=0, y=0, w=2, h=2, output='test'),
+        dict(id='chosen window', visible=True, focused=False, x=1, y=1, w=4, h=3, output='test'),
+    ]))
+elif sys.argv[1] == 'outputs':
+    print(json.dumps([dict(name='test', position=dict(x=0, y=0),
+                          logical_size=dict(width=8, height=6), scale=1)]))
+else:
+    sys.exit(1)
+'''
+
 
 @unittest.skipUnless(shutil.which("magick"), "ImageMagick is required")
 class ShellCaptureTests(unittest.TestCase):
@@ -175,6 +202,59 @@ class ShellCaptureTests(unittest.TestCase):
     def test_asynchronous_ack_does_not_skip_file_flush(self):
         self.env["CAPTURE_DELAY"] = "0.5"
         self.capture("region-tmp")
+
+    def window_shims(self):
+        if not shutil.which("jq"):
+            self.skipTest("jq is required for window captures")
+        for tool in ("umbriel", "hyprctl", "slurp"):
+            shim = self.bin / tool
+            shim.write_text(WINDOW_SHIM)
+            shim.chmod(0o755)
+        self.env.update(UMBRIEL_SOCKET="", XDG_RUNTIME_DIR=str(self.tmp), NO_SAVE="1")
+
+    def assert_window_capture(self, path, dimensions):
+        self.addCleanup(path.unlink, missing_ok=True)
+        size = subprocess.check_output(
+            ["magick", "identify", "-format", "%w %h", str(path)], text=True)
+        self.assertEqual(size, dimensions)
+        self.assertFalse(list(self.shots.glob("*.png")))
+        self.assertFalse(list(self.tmp.glob("screen-toolkit-cap.*")))
+
+    def test_hyprland_window_uses_temporary_monitor_frame(self):
+        self.window_shims()
+        path = self.capture("annotate-window")
+        self.assert_window_capture(path, "4 3")
+        self.assertIn(["msg", "annotate", str(path)], self.calls())
+
+    def test_umbriel_focused_window_uses_temporary_monitor_frame(self):
+        self.window_shims()
+        self.env["UMBRIEL_SOCKET"] = str(self.tmp / "umbriel.sock")
+        self.assert_window_capture(self.capture("window-file"), "2 2")
+
+    def test_umbriel_picker_preserves_window_id_and_socket(self):
+        self.window_shims()
+        socket = str(self.tmp / "socket with spaces.sock")
+        path = self.capture("annotate-window-id", "chosen window", socket)
+        self.assert_window_capture(path, "4 3")
+        calls = [json.loads(line) for line in (self.root / "window-calls.jsonl").read_text().splitlines()]
+        self.assertTrue(calls)
+        self.assertTrue(all(call[2] == socket for call in calls))
+        self.assertIn(["msg", "annotate", str(path)], self.calls())
+
+    def test_legacy_umbriel_picker_removes_monitor_frame(self):
+        self.window_shims()
+        self.env.update(LEGACY="1", NO_SAVE="0")
+        path = self.capture("annotate-window-id", "chosen window", str(self.tmp / "umbriel.sock"))
+        self.assert_window_capture(path, "4 3")
+        self.assertIn(["msg", "screenshot-fullscreen"], self.calls())
+
+    def test_umbriel_missing_window_does_not_start_capture(self):
+        self.window_shims()
+        result = subprocess.run([str(SCRIPT), "annotate-window-id", "gone", str(self.tmp / "umbriel.sock")],
+                                env=self.env, text=True, capture_output=True, timeout=20)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("window gone", result.stdout)
+        self.assertFalse((self.root / "calls.jsonl").exists())
 
 
 if __name__ == "__main__":

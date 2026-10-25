@@ -72,6 +72,7 @@ body:
         - cmd-runner
         - codexbar-meter
         - color_picker
+        - competitive-programming-contest-tracker
         - config-swap
         - contact-sounds
         - containers
@@ -277,6 +278,8 @@ body:
         - tmux-provider
         - todo
         - todoist
+        - todoist-manager
+        - token-monitor
         - topgrade-wrapper
         - udiskie
         - um5606_fan_state

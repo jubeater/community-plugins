@@ -1115,15 +1115,21 @@ tags = ["panel", "fun", "network", "privacy", "productivity", "utility"]
 [[plugin]]
 id = "alexander/screen-toolkit"
 name = "Screen Toolkit"
-version = "1.5.4"
-updated_at = 1792768758
+version = "2.0.0"
+updated_at = 1792962214
 added_at = 1785759728
 author = "alexander"
 license = "MIT"
 icon = "crosshair"
 description = "Screen tools: color picker, OCR, QR, palette, lens, annotate, measure, and recording."
-plugin_api = 13
+plugin_api = 42
 tags = ["recording", "utility", "bar", "panel", "shortcut", "service", "hyprland", "niri", "sway"]
+
+[[plugin.release]]
+plugin_api = 13
+version = "1.5.4"
+updated_at = 1792768758
+rev = "ab96fe87ec7af6d56ffd95465d25fee419cb3411"
 
 [[plugin.release]]
 plugin_api = 9
@@ -1160,8 +1166,8 @@ tags = ["bar", "panel", "mangowc", "utility"]
 [[plugin]]
 id = "maddingo/hypr-layout-switcher"
 name = "Hyprland Layout Switcher"
-version = "0.1.1"
-updated_at = 1787781204
+version = "0.2.0"
+updated_at = 1792961957
 added_at = 1785812073
 author = "maddingo"
 license = "MIT"
@@ -1567,8 +1573,8 @@ tags = ["bar", "panel", "service", "network", "utility", "indicator"]
 [[plugin]]
 id = "rylos/tailnet"
 name = "Tailnet"
-version = "2.1.0"
-updated_at = 1786904351
+version = "2.2.0"
+updated_at = 1792961988
 added_at = 1786904351
 author = "Marco Ziliani"
 license = "MIT"
@@ -4026,13 +4032,13 @@ tags = ["hyprland", "bar"]
 [[plugin]]
 id = "abuamar142/murattal"
 name = "Murattal"
-version = "0.1.0"
-updated_at = 1792859138
+version = "0.3.0"
+updated_at = 1792938408
 added_at = 1792859138
 author = "abuamar142"
 license = "MIT"
 icon = "music-note"
-description = "Stream murottal Al-Qur'an per surah and qari from mp3quran.net via mpv."
+description = "Stream murottal Al-Qur'an per surah or per ayah, with Arabic text and translation, via mpv."
 plugin_api = 24
 tags = ["bar", "panel", "service", "launcher", "audio", "media", "music"]
 
@@ -4087,3 +4093,42 @@ icon = "send"
 description = "Send and receive files, folders and text with LocalSend devices on your network."
 plugin_api = 24
 tags = ["network", "utility", "bar", "panel", "service"]
+
+[[plugin]]
+id = "snowballons/todoist-manager"
+name = "Todoist Manager"
+version = "1.1.0"
+updated_at = 1792938235
+added_at = 1792938235
+author = "snowballons"
+license = "MIT"
+icon = "checklist"
+description = "Todoist tasks in Noctalia"
+plugin_api = 33
+tags = ["productivity", "panel", "launcher", "bar"]
+
+[[plugin]]
+id = "shangshui0302/token-monitor"
+name = "Token Monitor"
+version = "0.1.0"
+updated_at = 1792939007
+added_at = 1792939007
+author = "Shangshui0302"
+license = "MIT"
+icon = "chart-donut-3"
+description = "Quotas, usage, sessions and an activity heatmap from your Token Monitor Hub."
+plugin_api = 32
+tags = ["bar", "panel", "service", "ai", "utility"]
+
+[[plugin]]
+id = "quantinium/competitive-programming-contest-tracker"
+name = "Competitive Programming Contest Tracker"
+version = "0.1.0"
+updated_at = 1792962600
+added_at = 1792962600
+author = "quantinium"
+license = "MIT"
+icon = "trophy"
+description = "Codeforces, LeetCode, CodeChef and AtCoder contest tracker with reminders and an upsolving list."
+plugin_api = 32
+tags = ["productivity"]
