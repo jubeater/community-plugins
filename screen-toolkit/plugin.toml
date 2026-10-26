@@ -9,7 +9,7 @@
 id = "alexander/screen-toolkit"
 name = "Screen Toolkit"
 version = "2.1.0"
-plugin_api = 42
+plugin_api = 43
 author = "alexander"
 license = "MIT"
 icon = "crosshair"
